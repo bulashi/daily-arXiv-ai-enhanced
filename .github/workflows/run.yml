@@ -8,6 +8,9 @@ on:
     - cron: "30 1 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 
 jobs:
   build:
@@ -42,7 +45,7 @@ jobs:
         export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
         export TOKEN_GITHUB=${{ secrets.TOKEN_GITHUB }}
         export LANGUAGE="${{ vars.LANGUAGE }}"
-        export CATEGORIES="${{ vars.CATEGORIES }}"
+        export CATEGORIES="cs.CL,cs.AI,cs.LG,cs.CV"
         export MODEL_NAME="${{ vars.MODEL_NAME }}"
         
         # 使用Scrapy爬取
@@ -58,6 +61,79 @@ jobs:
         echo "crawl_date=$today" >> $GITHUB_OUTPUT
         echo "爬取完成 / Crawling completed"
         
+    - name: Filter LLM hallucination papers
+      run: |
+        source .venv/bin/activate
+        today=${{ steps.crawl_step.outputs.crawl_date }}
+        paper_file="data/${today}.jsonl"
+        echo "Filtering LLM hallucination papers..."
+
+        export PAPER_FILE="$paper_file"
+        python - <<'PY'
+        import json
+        import os
+        import re
+        from pathlib import Path
+
+        paper_file = Path(os.environ["PAPER_FILE"])
+        if not paper_file.exists():
+            raise SystemExit(f"Paper file not found: {paper_file}")
+
+        strong_topic_re = re.compile(
+            r"\bhallucinat\w*\b|\bconfabulat\w*\b|\bvisual hallucination\b|"
+            r"\bmultimodal hallucination\b",
+            re.IGNORECASE,
+        )
+        topic_re = re.compile(
+            r"\bhallucinat\w*\b|\bconfabulat\w*\b|\bfactuality\b|\bfactual\b|"
+            r"\bfaithfulness\b|\bfaithful\b|\btruthfulness\b|\btruthful\b|"
+            r"\bgroundedness\b|\bgrounding\b|\bgrounded\b|\battribution\b|"
+            r"\bcitation\b|\bcite\b|\bverification\b|\bverifier\b|"
+            r"\bfact[- ]check\w*\b|\bfactual error\w*\b|\bknowledge conflict\w*\b|"
+            r"\bself[- ]correction\b|\buncertainty\b|\bcalibration\b|"
+            r"\blong[- ]form factuality\b",
+            re.IGNORECASE,
+        )
+        model_re = re.compile(
+            r"\blarge language model\w*\b|\bLLM\w*\b|\blanguage model\w*\b|"
+            r"\bfoundation model\w*\b|\bgenerative AI\b|\bchatbot\w*\b|"
+            r"\bmultimodal large language model\w*\b|\bMLLM\w*\b|\bVLM\w*\b|"
+            r"\bLVLM\w*\b|\bvision[- ]language model\w*\b|"
+            r"\bretrieval[- ]augmented generation\b|\bRAG\b",
+            re.IGNORECASE,
+        )
+
+        kept = []
+        total = 0
+        with paper_file.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                total += 1
+                item = json.loads(line)
+                categories = item.get("categories") or []
+                if isinstance(categories, list):
+                    categories_text = " ".join(str(c) for c in categories)
+                else:
+                    categories_text = str(categories)
+                text = "\n".join(
+                    str(item.get(key, ""))
+                    for key in ("title", "summary", "comment")
+                ) + "\n" + categories_text
+
+                if strong_topic_re.search(text) or (topic_re.search(text) and model_re.search(text)):
+                    kept.append(item)
+
+        if kept:
+            with paper_file.open("w", encoding="utf-8") as f:
+                for item in kept:
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            print(f"Kept {len(kept)} of {total} papers for LLM hallucination tracking.")
+        else:
+            paper_file.unlink()
+            print(f"No LLM hallucination papers found among {total} crawled papers; removed {paper_file}.")
+        PY
+
     - name: Check for duplicates
       id: dedup_check
       run: |
